@@ -1,0 +1,50 @@
+name: Release
+
+# Publishes to PyPI when a version tag is pushed.
+#
+# Uses PyPI Trusted Publishing - no API token secret required. Before the first
+# release, add a pending publisher at
+# https://pypi.org/manage/account/publishing/ for project `proton-alias-send`,
+# this repository, workflow `release.yml`, environment `pypi`.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Verify the tag matches the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(uv run python -c 'import proton_alias_send as p; print(p.__version__)')"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag $tag does not match __version__ $version" >&2
+            exit 1
+          fi
+
+      - run: uv build
+      - run: uvx twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
