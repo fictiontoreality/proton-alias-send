@@ -81,6 +81,19 @@ def test_config_dir_honours_xdg(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cli.get_config_dir() == Path("/tmp/xdg/proton-alias-send")
 
 
+@pytest.mark.parametrize(("system", "var"), [("Linux", "XDG_CONFIG_HOME"), ("Windows", "APPDATA")])
+def test_empty_config_base_counts_as_unset(
+    system: str, var: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An empty value must not put the config, and later the key, in the current directory."""
+    monkeypatch.setattr(platform, "system", lambda: system)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv(var, "")
+
+    assert cli.get_config_dir().is_absolute()
+    assert tmp_path in cli.get_config_dir().parents
+
+
 def test_boolean_flags_have_no_duplicate_negations() -> None:
     """BooleanOptionalAction generates --no-*; spelling it out too yields --no-no-copy."""
     parser = cli.build_parser(Path("/tmp/config.toml"))

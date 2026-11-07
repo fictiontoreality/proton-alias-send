@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
@@ -109,21 +110,130 @@ def test_base_url_trailing_slash_is_normalised(patched) -> None:
 
 def test_create_contact_returns_reverse_alias(patched) -> None:
     patched({
-        f"{BASE}/api/aliases/7/contacts": {"reverse_alias": "boss_at_x_abc@sl.co", "existed": False}
+        f"{BASE}/api/aliases/7/contacts": {
+            "reverse_alias": "boss x.io <ra+abc@sl.co>",
+            "reverse_alias_address": "ra+abc@sl.co",
+            "existed": False,
+        }
     })
 
-    assert cli.create_contact(BASE, KEY, 7, "boss@x.io") == "boss_at_x_abc@sl.co"
+    assert cli.create_contact(BASE, KEY, 7, "boss@x.io") == "ra+abc@sl.co"
 
 
 def test_create_contact_rejects_a_response_without_the_field(patched) -> None:
-    patched({f"{BASE}/api/aliases/7/contacts": {"ok": True}})
+    """The display-only reverse_alias must not be mistaken for the address."""
+    patched({f"{BASE}/api/aliases/7/contacts": {"reverse_alias": "boss x.io <ra+abc@sl.co>"}})
 
-    with pytest.raises(RuntimeError, match="no reverse_alias"):
+    with pytest.raises(RuntimeError, match="no reverse_alias_address"):
         cli.create_contact(BASE, KEY, 7, "boss@x.io")
 
 
-def test_auth_header_uses_simplelogins_spelling() -> None:
-    assert cli._headers(KEY) == {"Authentication": KEY, "Content-Type": "application/json"}
+def capture_request(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Patch urlopen to serve an empty page and record the request it receives."""
+    seen: dict[str, Any] = {}
+
+    def record(req: Any, timeout: float | None = None) -> FakeResponse:
+        seen["req"] = req
+        return FakeResponse(json.dumps({"aliases": []}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", record)
+    return seen
+
+
+def test_auth_header_uses_simplelogins_spelling(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = capture_request(monkeypatch)
+
+    cli.find_alias_id(BASE, KEY, "a@x.io")
+
+    assert seen["req"].get_header("Authentication") == KEY
+    assert seen["req"].get_header("Authorization") is None
+
+
+def test_api_key_does_not_follow_a_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """urllib copies ordinary headers onto redirects, which would hand the key to another host."""
+    seen = capture_request(monkeypatch)
+    cli.find_alias_id(BASE, KEY, "a@x.io")
+
+    redirected = urllib.request.HTTPRedirectHandler().redirect_request(
+        seen["req"], io.BytesIO(), 302, "Found", http.client.HTTPMessage(), "https://evil.test/"
+    )
+
+    assert redirected is not None
+    assert redirected.get_header("Authentication") is None
+
+
+def test_alias_lookup_searches_server_side(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scanning every page would miss aliases past MAX_ALIAS_PAGES * 20."""
+    seen = capture_request(monkeypatch)
+
+    cli.find_alias_id(BASE, KEY, " Work@SimpleLogin.io ")
+
+    assert seen["req"].get_method() == "POST"
+    assert json.loads(seen["req"].data) == {"query": "work@simplelogin.io"}
+
+
+@pytest.mark.parametrize("url", ["notaurl", "file:///etc", "ftp://sl.test", "http://[bad"])
+def test_non_http_base_url_is_rejected_before_any_request(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = capture_request(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="Invalid base URL"):
+        cli.find_alias_id(url, KEY, "a@x.io")
+
+    assert seen == {}
+
+
+@pytest.mark.parametrize("bad_key", ["secret\nkey", "s\u20acret"])
+def test_invalid_api_key_is_not_echoed_in_the_error(
+    bad_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def reject(req: Any, timeout: float | None = None) -> FakeResponse:
+        raise ValueError(f"Invalid header value {bad_key!r}")  # what http.client raises
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+
+    with pytest.raises(RuntimeError, match="invalid characters") as exc:
+        cli.find_alias_id(BASE, bad_key, "a@x.io")
+
+    assert "secret" not in str(exc.value)
+    assert "s\u20acret" not in str(exc.value)
+
+
+def test_invalid_port_becomes_a_runtime_error(patched) -> None:
+    patched({f"{BASE}/api/v2/aliases?page_id=0": http.client.InvalidURL("nonnumeric port")})
+
+    with pytest.raises(RuntimeError, match="Could not reach"):
+        cli.find_alias_id(BASE, KEY, "a@x.io")
+
+
+def test_connection_lost_while_reading_becomes_a_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Dropped(FakeResponse):
+        def read(self, *args: Any) -> bytes:
+            raise http.client.IncompleteRead(b"")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: Dropped())
+
+    with pytest.raises(RuntimeError, match="Could not reach"):
+        cli.find_alias_id(BASE, KEY, "a@x.io")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"aliases": "nope"},
+        {"aliases": ["nope"]},
+        {"aliases": [{"email": "a@x.io"}]},
+        {"aliases": [{"email": "a@x.io", "id": "seven"}]},
+    ],
+)
+def test_malformed_alias_listing_becomes_a_runtime_error(patched, payload: dict) -> None:
+    patched({f"{BASE}/api/v2/aliases?page_id=0": payload})
+
+    with pytest.raises(RuntimeError, match=r"Unexpected API response|valid id"):
+        cli.find_alias_id(BASE, KEY, "a@x.io")
 
 
 def test_http_error_surfaces_the_api_message(patched) -> None:

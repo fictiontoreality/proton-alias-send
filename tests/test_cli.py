@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,7 +16,7 @@ import pytest
 from proton_alias_send import cli
 from tests.test_api import FakeResponse
 
-REVERSE = "boss_at_example.com_abc@simplelogin.co"
+REVERSE = "ra+abc@simplelogin.co"
 
 
 @pytest.fixture(autouse=True)
@@ -31,11 +34,15 @@ def api(monkeypatch: pytest.MonkeyPatch):
     def _open(req: Any, timeout: float | None = None) -> FakeResponse:
         seen.append({
             "url": req.full_url,
-            "key": req.headers.get("Authentication"),
+            "key": req.get_header("Authentication"),
             "body": json.loads(req.data) if req.data else None,
         })
         if "/contacts" in req.full_url:
-            return FakeResponse(json.dumps({"reverse_alias": REVERSE}).encode())
+            # Shaped like the real API, where the two fields differ.
+            return FakeResponse(json.dumps({
+                "reverse_alias": f"boss example.com <{REVERSE}>",
+                "reverse_alias_address": REVERSE,
+            }).encode())
         page = req.full_url.rsplit("page_id=", 1)[1]
         aliases = [{"id": 7, "email": "work@simplelogin.io"}] if page == "0" else []
         return FakeResponse(json.dumps({"aliases": aliases}).encode())
@@ -192,3 +199,89 @@ def test_interrupt_exits_130(
 
     assert cli.main([]) == 130
     assert "Interrupted" in capsys.readouterr().err
+
+
+def test_broken_pipe_exits_quietly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """stdout must be swapped out, or the flush at interpreter exit fails with status 120."""
+    def closed_pipe(argv: list[str] | None) -> int:
+        raise BrokenPipeError
+
+    redirected: list[int] = []
+    monkeypatch.setattr(cli, "run", closed_pipe)
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(fileno=lambda: 99))
+    monkeypatch.setattr(os, "dup2", lambda _src, dst: redirected.append(dst))
+
+    assert cli.main([]) == 0
+    assert redirected == [99]
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ('alias = 5', "'alias' must be a string"),
+        ('base_url = 1', "'base_url' must be a string"),
+        ('copy = "false"', "'copy' must be true or false"),
+        ('quiet = 1', "'quiet' must be true or false"),
+    ],
+)
+def test_wrongly_typed_config_is_reported_not_raised(
+    line: str, message: str, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    defaults = {"api_key": 'api_key = "k"', "alias": 'alias = "work@simplelogin.io"'}
+    defaults.pop(line.split(" ")[0], None)
+    config = write_config(tmp_path, "\n".join([*defaults.values(), line]) + "\n")
+
+    assert cli.run(["--config", str(config), "boss@example.com"]) == 1
+    assert message in capsys.readouterr().err
+
+
+def test_wrongly_typed_api_key_is_not_echoed(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    config = write_config(tmp_path, 'api_key = 1234567\nalias = "work@simplelogin.io"\n')
+
+    assert cli.run(["--config", str(config), "boss@example.com"]) == 1
+
+    err = capsys.readouterr().err
+    assert "'api_key' must be a string" in err
+    assert "1234567" not in err
+
+
+def test_api_key_whitespace_is_stripped(api, tmp_path: Path) -> None:
+    config = write_config(tmp_path, 'api_key = "k\\n"\nalias = "work@simplelogin.io"\n')
+
+    assert cli.run(["--config", str(config), "boss@example.com"]) == 0
+    assert api[0]["key"] == "k"
+
+
+def test_non_utf8_config_is_reported_cleanly(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_bytes(b'alias = "\xff"\n')
+
+    with pytest.raises(SystemExit) as exc:
+        cli.run(["--config", str(config), "boss@example.com"])
+
+    assert "Error parsing config file" in str(exc.value.code)
+
+
+@pytest.mark.parametrize(
+    ("url", "warns"),
+    [
+        ("https://sl.example.com", False),
+        ("http://localhost:7777", False),
+        ("http://127.0.0.1:7777", False),
+        ("http://[::1]:7777", False),
+        ("http://192.168.1.5", True),
+        ("http://sl.example.com", True),
+    ],
+)
+def test_plain_http_to_a_remote_host_warns_on_stderr(
+    url: str, warns: bool, api, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    config = write_config(tmp_path, 'api_key = "k"\nalias = "work@simplelogin.io"\n')
+
+    assert cli.run(["--config", str(config), "-q", "--base-url", url, "boss@example.com"]) == 0
+
+    out = capsys.readouterr()
+    assert out.out == f"{REVERSE}\n"
+    assert ("sent unencrypted" in out.err) is warns

@@ -21,6 +21,8 @@ Requires Python 3.11+ (stdlib tomllib).
 from __future__ import annotations
 
 import argparse
+import http.client
+import ipaddress
 import json
 import os
 import platform
@@ -29,6 +31,7 @@ import subprocess
 import sys
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -39,8 +42,9 @@ DEFAULT_BASE_URL = "https://app.simplelogin.io"
 # Seconds to wait on any single API call before giving up.
 REQUEST_TIMEOUT = 30
 
-# Safety net for paginating aliases: a server that ignores page_id would
-# otherwise loop forever. 20 pages is ~4000 aliases at the default page size.
+# Safety net for paginating alias search results: a server that ignores page_id
+# would otherwise loop forever. The API returns 20 aliases per page, so this is
+# 400 results, which is plenty because the search narrows them to near-matches.
 MAX_ALIAS_PAGES = 20
 
 # Keys recognised in the config file.
@@ -54,7 +58,7 @@ SAMPLE_CONFIG = """\
 #   chmod 600 {config_path}
 
 # Your SimpleLogin API key (required if not passed via --api-key).
-# Get it at: https://app.simplelogin.io/dashboard/setting
+# Get it at: https://app.simplelogin.io/dashboard/api_key
 # Leave empty to fall back to the $SIMPLELOGIN_API_KEY environment variable.
 api_key = ""
 
@@ -79,10 +83,11 @@ quiet = false
 def get_config_dir() -> Path:
     system = platform.system()
     if system == "Windows":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
     else:
-        # Linux, macOS, BSDs - honour XDG_CONFIG_HOME
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        # Linux, macOS, BSDs - honour XDG_CONFIG_HOME. Empty counts as unset, per
+        # the XDG spec; otherwise the config would land in the current directory.
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     return base / APP_NAME
 
 
@@ -103,7 +108,7 @@ def load_config(config_path: Path) -> dict[str, Any]:
             config = tomllib.load(fh)
     except OSError as exc:
         sys.exit(f"Error reading config file {config_path}: {exc}")
-    except tomllib.TOMLDecodeError as exc:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         sys.exit(f"Error parsing config file {config_path}: {exc}")
 
     unknown = set(config.keys()) - KNOWN_CONFIG_KEYS
@@ -174,8 +179,14 @@ def cmd_init_config(config_path: Path) -> int:
 # SimpleLogin API
 # ---------------------------------------------------------------------------
 
-def _headers(api_key: str) -> dict[str, str]:
-    return {"Authentication": api_key, "Content-Type": "application/json"}
+def _require_http_url(url: str) -> None:
+    """Reject anything but http(s), which urllib would otherwise happily open (e.g. file://)."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme.lower()
+    except ValueError:
+        scheme = ""
+    if scheme not in ("http", "https"):
+        raise RuntimeError(f"Invalid base URL in {url}: it must start with https:// or http://")
 
 
 def _error_text(payload: Any) -> str:
@@ -197,13 +208,22 @@ def _request(
     Every failure mode - HTTP error, transport error, malformed body - is
     normalised into RuntimeError so callers have a single thing to catch.
     """
+    _require_http_url(url)
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, headers=_headers(api_key), method=method)
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}, method=method
+    )
+    # Unredirected, so a redirect can't carry the key to another host. SimpleLogin
+    # spells this header `Authentication`, not `Authorization`.
+    req.add_unredirected_header("Authentication", api_key)
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
-        error_body = exc.read()
+        try:
+            error_body = exc.read()
+        except (OSError, http.client.HTTPException):
+            error_body = b""
         try:
             payload = json.loads(error_body)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -216,6 +236,15 @@ def _request(
         raise RuntimeError(f"Could not reach {url}: {exc.reason}") from None
     except TimeoutError:
         raise RuntimeError(f"Timed out after {REQUEST_TIMEOUT}s waiting for {url}") from None
+    except (OSError, http.client.HTTPException) as exc:
+        raise RuntimeError(f"Could not reach {url}: {exc}") from None
+    except ValueError:
+        # http.client quotes the offending header in this exception, so never
+        # include it here: the bad value is usually the API key.
+        raise RuntimeError(
+            f"Could not send the request to {url}: the API key or URL contains "
+            "invalid characters."
+        ) from None
 
     try:
         decoded = json.loads(raw)
@@ -229,23 +258,36 @@ def _request(
 
 
 def find_alias_id(base_url: str, api_key: str, alias_email: str) -> int | None:
-    """Paginate through all aliases and return the ID for alias_email, or None."""
+    """Search the account's aliases and return the ID for alias_email, or None."""
     alias_email = alias_email.lower().strip()
     base_url = base_url.rstrip("/")
     for page in range(MAX_ALIAS_PAGES):
-        data = _request("GET", f"{base_url}/api/v2/aliases?page_id={page}", api_key)
+        # The query is a loose server-side match, so results still need the exact
+        # comparison below. POST is the documented way to send it in a body.
+        data = _request(
+            "POST",
+            f"{base_url}/api/v2/aliases?page_id={page}",
+            api_key,
+            body={"query": alias_email},
+        )
         aliases = data.get("aliases") or []
         if not aliases:
             return None
+        if not isinstance(aliases, list):
+            raise RuntimeError(f"Unexpected API response (aliases is not a list): {data}")
         for alias in aliases:
+            if not isinstance(alias, dict):
+                raise RuntimeError(f"Unexpected API response (malformed alias): {alias!r}")
             if str(alias.get("email", "")).lower() == alias_email:
-                alias_id = alias.get("id")
-                if alias_id is None:
-                    raise RuntimeError(f"Alias '{alias_email}' returned without an id field.")
-                return int(alias_id)
+                try:
+                    return int(alias["id"])
+                except (KeyError, TypeError, ValueError):
+                    raise RuntimeError(
+                        f"Alias '{alias_email}' returned without a valid id field."
+                    ) from None
     raise RuntimeError(
-        f"Gave up after {MAX_ALIAS_PAGES} pages of aliases without finding "
-        f"'{alias_email}'. Pass -a with the exact alias address."
+        f"Gave up after {MAX_ALIAS_PAGES} pages of search results without finding "
+        f"'{alias_email}'. Check the alias address for typos."
     )
 
 
@@ -260,10 +302,11 @@ def create_contact(base_url: str, api_key: str, alias_id: int, contact_email: st
         api_key,
         body={"contact": contact_email},
     )
-    reverse_alias = data.get("reverse_alias")
-    if not isinstance(reverse_alias, str) or not reverse_alias:
-        raise RuntimeError(f"Unexpected API response (no reverse_alias field): {data}")
-    return reverse_alias
+    # Not `reverse_alias`, which is a display string: "Name a@b.c <ra+x@sl.co>".
+    address = data.get("reverse_alias_address")
+    if not isinstance(address, str) or not address:
+        raise RuntimeError(f"Unexpected API response (no reverse_alias_address field): {data}")
+    return address
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +447,36 @@ def log(msg: str, quiet: bool) -> None:
         print(msg, file=sys.stderr)
 
 
+def _config_type_errors(strings: dict[str, Any], booleans: dict[str, Any]) -> list[str]:
+    """Report wrongly typed settings by name. Values stay out of it: one may be the API key."""
+    errors = [
+        f"Setting '{name}' must be a string."
+        for name, value in strings.items()
+        if value is not None and not isinstance(value, str)
+    ]
+    errors += [
+        f"Setting '{name}' must be true or false."
+        for name, value in booleans.items()
+        if not isinstance(value, bool)
+    ]
+    return errors
+
+
+def _is_plaintext_remote(base_url: str) -> bool:
+    """True for an http:// URL off this machine, where the API key travels unencrypted."""
+    try:
+        parts = urllib.parse.urlsplit(base_url)
+        host = parts.hostname or ""
+    except ValueError:
+        return False
+    if parts.scheme.lower() != "http" or host.lower() == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return True
+
+
 def run(argv: list[str] | None = None) -> int:
     default_config_path = get_config_path()
     parser = build_parser(default_config_path)
@@ -424,7 +497,12 @@ def run(argv: list[str] | None = None) -> int:
     quiet    = merge(args.quiet,    config.get("quiet"),    False)
 
     # Validate - collect all errors before printing so the user can fix them in one go
-    errors: list[str] = []
+    errors = _config_type_errors(
+        strings={"api_key": api_key, "alias": alias, "base_url": base_url},
+        booleans={"copy": do_copy, "quiet": quiet},
+    )
+    if isinstance(api_key, str):
+        api_key = api_key.strip()
     if not args.contact:
         errors.append("CONTACT_EMAIL is required.")
     if not api_key:
@@ -440,6 +518,12 @@ def run(argv: list[str] | None = None) -> int:
         for msg in errors:
             print(f"Error: {msg}", file=sys.stderr)
         return 1
+
+    if _is_plaintext_remote(base_url):
+        print(
+            f"Warning: {base_url} is not HTTPS, so your API key is sent unencrypted.",
+            file=sys.stderr,
+        )
 
     try:
         log(f"Looking up alias ID for {alias} ...", quiet)
@@ -459,7 +543,8 @@ def run(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print(reverse_alias)
+    # Flush here so a closed pipe surfaces inside main(), not at interpreter exit.
+    print(reverse_alias, flush=True)
 
     if do_copy:
         if copy_to_clipboard(reverse_alias):
@@ -482,6 +567,10 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     except BrokenPipeError:
         # e.g. `proton-alias-send ... | head` - exit quietly like other CLI tools.
+        # Point stdout at devnull so the flush at interpreter exit can't fail too.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
         return 0
 
 

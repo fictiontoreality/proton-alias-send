@@ -19,3 +19,6 @@ Initial release.
 - `--copy/--no-copy` clipboard support via `pbcopy`, `wl-copy`, `xclip`, `xsel`, or `clip`.
 - `--base-url` for self-hosted SimpleLogin instances.
 - `find_alias_id` and `create_contact` are importable for use as a library.
+
+[Unreleased]: https://github.com/fictiontoreality/proton-alias-send/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/fictiontoreality/proton-alias-send/releases/tag/v0.1.0

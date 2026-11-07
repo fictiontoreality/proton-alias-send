@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/proton-alias-send.svg)](https://pypi.org/project/proton-alias-send/)
 [![Python](https://img.shields.io/pypi/pyversions/proton-alias-send.svg)](https://pypi.org/project/proton-alias-send/)
-[![License](https://img.shields.io/pypi/l/proton-alias-send.svg)](LICENSE)
+[![License](https://img.shields.io/pypi/l/proton-alias-send.svg)](https://github.com/fictiontoreality/proton-alias-send/blob/main/LICENSE)
 
 Create a Proton Pass / SimpleLogin **reverse alias** from the command line or Python, so you can
 send mail *from* one of your aliases without opening the web dashboard.
@@ -18,11 +18,12 @@ Looking up alias ID for work@simplelogin.io ...
   Found alias ID: 1234567
 Creating contact for boss@example.com ...
   Done.
-boss_at_example.com_abc123@simplelogin.co
+ra+abc123xyz@simplelogin.co
 ```
 
-Mail sent to `boss_at_example.com_abc123@simplelogin.co` arrives at `boss@example.com`
-appearing to come from `work@simplelogin.io`.
+Mail sent to `ra+abc123xyz@simplelogin.co` arrives at `boss@example.com`
+appearing to come from `work@simplelogin.io`. Send it from a mailbox linked to that alias;
+SimpleLogin only accepts mail to a reverse alias from those mailboxes.
 
 ## Install
 
@@ -52,8 +53,8 @@ That writes a commented config file (mode `600` on Unix) to:
 | macOS        | `~/.config/proton-alias-send/config.toml`                          |
 | Windows      | `%APPDATA%\proton-alias-send\config.toml`                          |
 
-Fill in your API key from <https://app.simplelogin.io/dashboard/setting> and the alias you
-usually send from:
+Fill in your API key from <https://app.simplelogin.io/dashboard/api_key> and the alias you
+usually send from. The key must belong to the SimpleLogin account that holds the alias.
 
 ```toml
 api_key = "your-api-key-here"
@@ -62,7 +63,8 @@ copy    = true
 ```
 
 If you'd rather not keep the key on disk, leave `api_key = ""` and export
-the environment variable `SIMPLELOGIN_API_KEY` instead.
+the environment variable `SIMPLELOGIN_API_KEY` instead. Avoid `-k` on shared machines: a
+key on the command line is visible in `ps` and saved in your shell history.
 
 ## Usage
 
@@ -74,7 +76,7 @@ $ proton-alias-send --help
 | ------------------- | -------------------------------------------------------------- |
 | `-a`, `--alias`     | Alias to send from, overriding the config default               |
 | `-k`, `--api-key`   | API key, overriding config and `$SIMPLELOGIN_API_KEY`           |
-| `--base-url`        | Point at a self-hosted SimpleLogin instance                     |
+| `--base-url`        | Point at a self-hosted SimpleLogin instance (warns on plain `http://`) |
 | `--copy/--no-copy`  | Copy the result to the clipboard (`pbcopy`/`wl-copy`/`xclip`/`xsel`/`clip`) |
 | `-q`, `--quiet`     | Silence progress output on stderr                               |
 | `--config PATH`     | Use an alternate config file                                    |
@@ -122,6 +124,6 @@ $ uv build                # build sdist + wheel into dist/
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/fictiontoreality/proton-alias-send/blob/main/LICENSE).
 
 Not affiliated with Proton AG or SimpleLogin.
