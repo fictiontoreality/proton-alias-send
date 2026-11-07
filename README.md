@@ -27,7 +27,13 @@ appearing to come from `work@simplelogin.io`.
 ## Install
 
 ```console
-$ uv tool install proton-alias-send      # or: pipx install proton-alias-send
+pipx install proton-alias-send
+```
+
+or
+
+```console
+uv tool install proton-alias-send
 ```
 
 It has **no dependencies** outside the standard library and needs Python 3.11+.

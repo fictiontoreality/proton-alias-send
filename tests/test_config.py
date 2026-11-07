@@ -55,7 +55,8 @@ def test_init_config_writes_restrictive_permissions(tmp_path: Path) -> None:
 
     assert cli.cmd_init_config(path) == 0
     assert 'base_url = "https://app.simplelogin.io"' in path.read_text()
-    assert path.stat().st_mode & 0o777 == 0o600
+    if platform.system() != "Windows":  # no POSIX modes there; cmd_init_config skips the chmod
+        assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_init_config_refuses_to_clobber_without_a_tty(

@@ -176,6 +176,7 @@ def test_init_config_short_circuits_before_validation(
 
 def test_config_path_expands_a_tilde(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # what expanduser reads on Windows
 
     assert cli.run(["--config", "~/expanded.toml", "--init-config"]) == 0
     assert (tmp_path / "expanded.toml").exists()
