@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Warning when a config file holding an API key is readable or writable by other users.
+- Python 3.15 support.
+
+### Changed
+
+- `--init-config` writes the file atomically with mode `600` from the start. A failed write leaves
+  any existing config untouched, and a symlinked config keeps its link.
+
 ## [0.1.0] - 2026-11-07
 
 Initial release to PyPi.

@@ -29,6 +29,7 @@ import platform
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 import urllib.error
 import urllib.parse
@@ -117,6 +118,7 @@ def load_config(config_path: Path) -> dict[str, Any]:
             f"Warning: unknown config key(s) will be ignored: {', '.join(sorted(unknown))}",
             file=sys.stderr,
         )
+    _warn_if_exposed(config_path, config)
     return config
 
 
@@ -136,6 +138,42 @@ def merge(cli_val: Any, config_val: Any, fallback: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Config initialisation
 # ---------------------------------------------------------------------------
+
+def _write_private(path: Path, text: str) -> None:
+    """
+    Atomically replace path with text, readable only by the owner on Unix.
+
+    mkstemp creates the file with mode 600 from the start, so the content is never
+    exposed under looser permissions, and os.replace means a failed write leaves
+    any existing config intact instead of truncated. A symlinked config (as dotfile
+    managers create) is resolved first so the link survives and its target is written.
+    """
+    target = path.resolve()
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _warn_if_exposed(config_path: Path, config: dict[str, Any]) -> None:
+    """Warn when a config holding an API key can be read or changed by other users."""
+    if platform.system() == "Windows" or not config.get("api_key"):
+        return
+    try:
+        mode = stat.S_IMODE(config_path.stat().st_mode)
+    except OSError:
+        return
+    if mode & 0o077:
+        print(
+            f"Warning: {config_path} contains your API key but other users can access it "
+            f"(mode {mode:o}). Fix with: chmod 600 {config_path}",
+            file=sys.stderr,
+        )
+
 
 def cmd_init_config(config_path: Path) -> int:
     """Write a sample config file and set restrictive permissions on Unix."""
@@ -158,18 +196,17 @@ def cmd_init_config(config_path: Path) -> int:
 
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(
+        _write_private(
+            config_path,
             SAMPLE_CONFIG.format(config_path=config_path, base_url=DEFAULT_BASE_URL),
-            encoding="utf-8",
         )
-        if platform.system() != "Windows":
-            config_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
-            print(f"Created {config_path}  (permissions: 600)", file=sys.stderr)
-        else:
-            print(f"Created {config_path}", file=sys.stderr)
     except OSError as exc:
         print(f"Error writing config file {config_path}: {exc}", file=sys.stderr)
         return 1
+    if platform.system() != "Windows":
+        print(f"Created {config_path}  (permissions: 600)", file=sys.stderr)
+    else:
+        print(f"Created {config_path}", file=sys.stderr)
 
     print("Edit the file to add your API key and default alias.", file=sys.stderr)
     return 0

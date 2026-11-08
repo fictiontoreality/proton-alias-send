@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 from pathlib import Path
 
@@ -57,6 +58,94 @@ def test_init_config_writes_restrictive_permissions(tmp_path: Path) -> None:
     assert 'base_url = "https://app.simplelogin.io"' in path.read_text()
     if platform.system() != "Windows":  # no POSIX modes there; cmd_init_config skips the chmod
         assert path.stat().st_mode & 0o777 == 0o600
+
+
+posix_only = pytest.mark.skipif(
+    platform.system() == "Windows", reason="no POSIX permission bits on Windows"
+)
+
+
+@posix_only
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o620])
+def test_exposed_config_with_a_key_warns(
+    mode: int, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('api_key = "sekrit"\n')
+    path.chmod(mode)
+
+    cli.load_config(path)
+
+    err = capsys.readouterr().err
+    assert f"chmod 600 {path}" in err
+    assert "sekrit" not in err
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("body", "mode"),
+    [('api_key = "sekrit"\n', 0o600), ('api_key = ""\n', 0o644), ('alias = "a@b.io"\n', 0o644)],
+)
+def test_private_or_keyless_config_is_quiet(
+    body: str, mode: int, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """Without a key in the file there is nothing to protect, so no nagging."""
+    path = tmp_path / "config.toml"
+    path.write_text(body)
+    path.chmod(mode)
+
+    cli.load_config(path)
+
+    assert capsys.readouterr().err == ""
+
+
+@posix_only
+def test_init_config_overwrite_tightens_a_loose_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('api_key = "old"\n')
+    path.chmod(0o644)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+
+    assert cli.cmd_init_config(path) == 0
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert 'api_key = ""' in path.read_text()
+
+
+def test_init_config_failure_keeps_the_old_file_and_no_temp_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('api_key = "keep-me"\n')
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+
+    def fail(_src: object, _dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", fail)
+
+    assert cli.cmd_init_config(path) == 1
+    assert path.read_text() == 'api_key = "keep-me"\n'
+    assert [p.name for p in tmp_path.iterdir()] == ["config.toml"]
+
+
+@posix_only
+def test_init_config_writes_through_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dotfile managers symlink configs; replacing the link would silently detach it."""
+    real = tmp_path / "dotfiles" / "config.toml"
+    real.parent.mkdir()
+    real.write_text("")
+    link = tmp_path / "config.toml"
+    link.symlink_to(real)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+
+    assert cli.cmd_init_config(link) == 0
+    assert link.is_symlink()
+    assert 'base_url = "https://app.simplelogin.io"' in real.read_text()
+    assert real.stat().st_mode & 0o777 == 0o600
 
 
 def test_init_config_refuses_to_clobber_without_a_tty(

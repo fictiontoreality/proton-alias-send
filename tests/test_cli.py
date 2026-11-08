@@ -54,6 +54,7 @@ def api(monkeypatch: pytest.MonkeyPatch):
 def write_config(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "config.toml"
     path.write_text(body)
+    path.chmod(0o600)  # As --init-config leaves it; looser modes trigger a warning.
     return path
 
 
