@@ -43,6 +43,11 @@ DEFAULT_BASE_URL = "https://app.simplelogin.io"
 # Seconds to wait on any single API call before giving up.
 REQUEST_TIMEOUT = 30
 
+# Seconds to give each clipboard tool. They return almost instantly when they
+# work; a hang (say, xclip with an unreachable display) must not stall the CLI
+# after the result has already been printed.
+CLIPBOARD_TIMEOUT = 5
+
 # Safety net for paginating alias search results: a server that ignores page_id
 # would otherwise loop forever. The API returns 20 aliases per page, so this is
 # 400 results, which is plenty because the search narrows them to near-matches.
@@ -350,29 +355,33 @@ def create_contact(base_url: str, api_key: str, alias_id: int, contact_email: st
 # Clipboard
 # ---------------------------------------------------------------------------
 
+def clipboard_commands(system: str) -> list[list[str]]:
+    """Clipboard tools to try, in order, for a platform.system() value."""
+    if system == "Darwin":
+        return [["pbcopy"]]
+    if system == "Windows":
+        return [["clip"]]
+    # Linux and the BSDs (FreeBSD, OpenBSD, NetBSD, DragonFly, ...) share the
+    # same Wayland/X11 tools, so any other Unix gets the same list.
+    return [
+        ["wl-copy"],  # Wayland
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+    ]
+
+
 def copy_to_clipboard(text: str) -> bool:
     """Try to copy text to the system clipboard. Returns True on success."""
-    system = platform.system()
-    candidates: list[list[str]] = []
-    if system == "Darwin":
-        candidates = [["pbcopy"]]
-    elif system == "Linux":
-        candidates = [
-            ["wl-copy"],  # Wayland
-            ["xclip", "-selection", "clipboard"],
-            ["xsel", "--clipboard", "--input"],
-        ]
-    elif system == "Windows":
-        candidates = [["clip"]]
-
-    for cmd in candidates:
+    for cmd in clipboard_commands(platform.system()):
         try:
             subprocess.run(
-                cmd, input=text.encode(), check=True,
+                cmd, input=text.encode(), check=True, timeout=CLIPBOARD_TIMEOUT,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             return True
-        except (FileNotFoundError, OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            # Missing, failing, or hung (e.g. xclip with no reachable display):
+            # move on to the next tool. run() kills a timed-out process itself.
             continue
     return False
 
@@ -588,8 +597,8 @@ def run(argv: list[str] | None = None) -> int:
             log("Copied to clipboard.", quiet)
         else:
             print(
-                "Warning: clipboard copy failed. No supported tool found "
-                "(pbcopy / xclip / xsel / wl-copy / clip).",
+                "Warning: clipboard copy failed. No clipboard tool worked "
+                "(pbcopy / wl-copy / xclip / xsel / clip).",
                 file=sys.stderr,
             )
     return 0
