@@ -6,11 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-07
+
 ### Added
 
 - Warning when a config file holding an API key is readable or writable by other users.
 - Python 3.15 support.
 - `--copy` on FreeBSD, OpenBSD, NetBSD, and other BSDs, via `wl-copy`, `xclip`, or `xsel`.
+- `SECURITY.md`, describing how to report vulnerabilities privately.
 
 ### Changed
 
@@ -33,5 +36,6 @@ Initial release to PyPi.
 - `--base-url` for self-hosted SimpleLogin instances.
 - `find_alias_id` and `create_contact` are importable for use as a library.
 
-[Unreleased]: https://github.com/fictiontoreality/proton-alias-send/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/fictiontoreality/proton-alias-send/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/fictiontoreality/proton-alias-send/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/fictiontoreality/proton-alias-send/releases/tag/v0.1.0
